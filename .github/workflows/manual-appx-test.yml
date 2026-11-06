@@ -1,258 +1,83 @@
 name: Private Xbox AppX test build
-
-
-
 on:
-
   workflow_dispatch:
-  
     inputs:
-    
       package_version:
-      
         description: Package version (higher than the installed build)
-        
         required: true
-        
         default: "0.3.10.4"
-        
         type: string
-        
-
-
 permissions:
-
   contents: read
-  
-
-
 jobs:
-
   build:
-  
     runs-on: windows-2025
-    
     timeout-minutes: 240
-    
     steps:
-    
       - uses: actions/checkout@v7
-      
-
-
       - name: Extract modified source
-      
         shell: pwsh
-        
         run: Expand-Archive -LiteralPath .\jadyx-framegen-fsr1-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
-        
-
-
       - name: Install shader and assembler tools
-      
         shell: powershell
-        
         run: |
-        
           $ErrorActionPreference = "Stop"
-          
           $zip = Join-Path $env:RUNNER_TEMP "glslang.zip"
-          
           Invoke-WebRequest "https://github.com/KhronosGroup/glslang/releases/download/16.6.0/glslang-16.6.0-windows-x86_64-release.zip" -OutFile $zip
-          
           if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne "82BF434E69B9BB4829DE7E2B4BC2C5E7A7861E53D66CF75E5CC70F5F694A8D9B") { throw "glslang checksum mismatch" }
-          
           Expand-Archive $zip C:\glslang -Force
-          
           Copy-Item C:\glslang\bin\glslang.exe C:\glslang\bin\glslangValidator.exe
-          
           if (-not (Test-Path "C:\Program Files\NASM\nasm.exe")) { choco install nasm -y --no-progress }
-          
           if (-not (Get-Command jom -ErrorAction SilentlyContinue)) { choco install jom -y --no-progress }
-          
           if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl is missing from the runner" }
-          
-
-
       - name: Configure UWP x64
-      
         shell: cmd
-        
         working-directory: src\jadyx-0.3.10.3
-        
         run: tools\xbox\build-env.bat cmake --preset uwp-x64
-        
-
-
       - name: Build Jadyx
-      
         shell: cmd
-        
         working-directory: src\jadyx-0.3.10.3
-        
-        run: tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx
-        
-
-
-      - name: Run project gates
-      
-        shell: pwsh
-        
-        working-directory: src\jadyx-0.3.10.3
-        
-        run: tools/xbox/tests/run-updater-gates.ps1
-        
-
-
-      - name: Build Mesa SPIR-V to DXIL translator
-      
-        shell: powershell
-        
-        working-directory: src\jadyx-0.3.10.3
-        
-        run: |
-        
-          $ErrorActionPreference = "Stop"
-          
-          $work = Join-Path $env:RUNNER_TEMP "mesa-build"
-          
-          & tools\xbox\build-spirv-to-dxil.ps1 -WorkDir $work
-          
-          if ($LASTEXITCODE -ne 0) { throw "SPIR-V to DXIL build failed" }
-          
-          $dll = Join-Path $work "build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
-          
-          if (-not (Test-Path $dll)) { throw "spirv_to_dxil.dll was not produced" }
-          
-          "SPIRV_DLL=$dll" >> $env:GITHUB_ENV
-          
-
-
-      - name: Package and sign with a temporary test certificate
-      
-        shell: pwsh
-        
-        working-directory: src\jadyx-0.3.10.3
-        
         env:
-        
-          PACKAGE_VERSION: ${{ inputs.package_version }}
-          
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx --parallel 2
+      - name: Run project gates
+        shell: pwsh
+        working-directory: src\jadyx-0.3.10.3
+        run: tools/xbox/tests/run-updater-gates.ps1
+      - name: Build Mesa SPIR-V to DXIL translator
+        shell: powershell
+        working-directory: src\jadyx-0.3.10.3
         run: |
-        
           $ErrorActionPreference = "Stop"
-          
+          $work = Join-Path $env:RUNNER_TEMP "mesa-build"
+          & tools\xbox\build-spirv-to-dxil.ps1 -WorkDir $work
+          if ($LASTEXITCODE -ne 0) { throw "SPIR-V to DXIL build failed" }
+          $dll = Join-Path $work "build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
+          if (-not (Test-Path $dll)) { throw "spirv_to_dxil.dll was not produced" }
+          "SPIRV_DLL=$dll" >> $env:GITHUB_ENV
+      - name: Package and sign with a temporary test certificate
+        shell: pwsh
+        working-directory: src\jadyx-0.3.10.3
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
           $pfx = Join-Path $env:RUNNER_TEMP "jadyx-test.pfx"
-          
           $plainPassword = [guid]::NewGuid().ToString("N") + "aA1!"
-          
           $password = ConvertTo-SecureString $plainPassword -AsPlainText -Force
-          
           $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=JadyxDev" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(1)
-          
           Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
-          
           $env:JADYX_PFX_PASSWORD = $plainPassword
-          
           & tools\xbox\package-appx.ps1 -Release -Version $env:PACKAGE_VERSION -SpirvToDxil $env:SPIRV_DLL -PfxPath $pfx
-          
           if ($LASTEXITCODE -ne 0) { throw "AppX packaging/signing failed" }
-          
           $out = Join-Path $env:GITHUB_WORKSPACE "out"
-          
           New-Item -ItemType Directory -Force $out | Out-Null
-          
           Copy-Item "build-uwp\package\jadyx.appx" (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_x64.appx")
-          
           Copy-Item "build-uwp\package\jadyx.cer" (Join-Path $out "Jadyx_test.cer")
-          
           Copy-Item "build-uwp\package\Microsoft.VCLibs.x64.14.00.appx" $out
-          
-
-
       - uses: actions/upload-artifact@v7
-      
         with:
-        
           name: jadyx-xbox-appx-test
-          
           path: out/*
-          
           if-no-files-found: error
-          
           retention-days: 7
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
