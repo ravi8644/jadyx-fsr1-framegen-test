@@ -6,7 +6,7 @@ on:
       package_version:
         description: Package version (higher than the installed build)
         required: true
-        default: "0.3.10.5"
+        default: "0.3.10.6"
         type: string
 
 permissions:
@@ -21,7 +21,7 @@ jobs:
 
       - name: Extract modified source
         shell: pwsh
-        run: Expand-Archive -LiteralPath .\jadyx-framegen-fsr1-4k-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
+        run: Expand-Archive -LiteralPath .\jadyx-framegen-fsr1-4k-opt-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
 
       - name: Install shader and assembler tools
         shell: powershell
