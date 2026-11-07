@@ -1,11 +1,11 @@
-name: Xbox AppX test build
+name: Xbox AppX test build (RAM pressure test)
 on:
   workflow_dispatch:
     inputs:
       package_version:
         description: Package version (higher than the installed build)
         required: true
-        default: "0.3.11.0"
+        default: "0.3.11.1"
         type: string
 permissions:
   contents: read
@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v7
       - name: Extract merged source
         shell: pwsh
-        run: Expand-Archive -LiteralPath .\jadyx-0.3.11.0-fsr1-framegen-4k.zip -DestinationPath $env:GITHUB_WORKSPACE\src
+        run: Expand-Archive -LiteralPath .\jadyx-0.3.11.1-fsr1-framegen-4k-ram-safe.zip -DestinationPath $env:GITHUB_WORKSPACE\src
       - name: Install shader and assembler tools
         shell: powershell
         run: |
