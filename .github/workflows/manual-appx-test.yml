@@ -1,28 +1,23 @@
-name: Private Xbox AppX test build
-
+name: Xbox AppX test build
 on:
   workflow_dispatch:
     inputs:
       package_version:
         description: Package version (higher than the installed build)
         required: true
-        default: "0.3.10.6"
+        default: "0.3.11.0"
         type: string
-
 permissions:
   contents: read
-
 jobs:
   build:
     runs-on: windows-2025
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-
-      - name: Extract modified source
+      - name: Extract merged source
         shell: pwsh
-        run: Expand-Archive -LiteralPath .\jadyx-framegen-fsr1-4k-opt-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
-
+        run: Expand-Archive -LiteralPath .\jadyx-0.3.11.0-fsr1-framegen-4k.zip -DestinationPath $env:GITHUB_WORKSPACE\src
       - name: Install shader and assembler tools
         shell: powershell
         run: |
@@ -35,27 +30,27 @@ jobs:
           if (-not (Test-Path "C:\Program Files\NASM\nasm.exe")) { choco install nasm -y --no-progress }
           if (-not (Get-Command jom -ErrorAction SilentlyContinue)) { choco install jom -y --no-progress }
           if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl is missing from the runner" }
-
       - name: Configure UWP x64
         shell: cmd
-        working-directory: src\jadyx-0.3.10.3
+        working-directory: src\jadyx-0.3.11.0
         run: tools\xbox\build-env.bat cmake --preset uwp-x64
-
       - name: Build Jadyx
         shell: cmd
-        working-directory: src\jadyx-0.3.10.3
+        working-directory: src\jadyx-0.3.11.0
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "2"
         run: tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx --parallel 2
-
       - name: Run project gates
         shell: pwsh
-        working-directory: src\jadyx-0.3.10.3
+        working-directory: src\jadyx-0.3.11.0
         run: tools/xbox/tests/run-updater-gates.ps1
-
+      - name: Test graphics settings (FSR and Frame Generation)
+        shell: pwsh
+        working-directory: src\jadyx-0.3.11.0
+        run: tools/xbox/tests/run-frontend.ps1 -Tests @('graphics-settings')
       - name: Build Mesa SPIR-V to DXIL translator
         shell: powershell
-        working-directory: src\jadyx-0.3.10.3
+        working-directory: src\jadyx-0.3.11.0
         run: |
           $ErrorActionPreference = "Stop"
           $work = Join-Path $env:RUNNER_TEMP "mesa-build"
@@ -64,10 +59,9 @@ jobs:
           $dll = Join-Path $work "build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
           if (-not (Test-Path $dll)) { throw "spirv_to_dxil.dll was not produced" }
           "SPIRV_DLL=$dll" >> $env:GITHUB_ENV
-
       - name: Package and sign with a temporary test certificate
         shell: pwsh
-        working-directory: src\jadyx-0.3.10.3
+        working-directory: src\jadyx-0.3.11.0
         env:
           PACKAGE_VERSION: ${{ inputs.package_version }}
         run: |
@@ -85,7 +79,6 @@ jobs:
           Copy-Item "build-uwp\package\jadyx.appx" (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_x64.appx")
           Copy-Item "build-uwp\package\jadyx.cer" (Join-Path $out "Jadyx_test.cer")
           Copy-Item "build-uwp\package\Microsoft.VCLibs.x64.14.00.appx" $out
-
       - uses: actions/upload-artifact@v7
         with:
           name: jadyx-xbox-appx-test
