@@ -1,11 +1,11 @@
-name: Xbox AppX test build (RAM pressure test)
+name: Xbox AppX preview build (Jadyx 0.3.12.1)
 on:
   workflow_dispatch:
     inputs:
       package_version:
-        description: Package version (higher than the installed build)
+        description: Package version; must be higher than 0.3.11.1
         required: true
-        default: "0.3.11.1"
+        default: "0.3.12.1"
         type: string
 permissions:
   contents: read
@@ -15,9 +15,9 @@ jobs:
     timeout-minutes: 240
     steps:
       - uses: actions/checkout@v7
-      - name: Extract merged source
+      - name: Extract merged 0.3.12.0 source
         shell: pwsh
-        run: Expand-Archive -LiteralPath .\jadyx-0.3.11.1-fsr1-framegen-4k-ram-safe.zip -DestinationPath $env:GITHUB_WORKSPACE\src
+        run: Expand-Archive -LiteralPath .\jadyx-0.3.12.1-merged-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
       - name: Install shader and assembler tools
         shell: powershell
         run: |
@@ -32,25 +32,25 @@ jobs:
           if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl is missing from the runner" }
       - name: Configure UWP x64
         shell: cmd
-        working-directory: src\jadyx-0.3.11.0
+        working-directory: src\jadyx-0.3.12.0
         run: tools\xbox\build-env.bat cmake --preset uwp-x64
       - name: Build Jadyx
         shell: cmd
-        working-directory: src\jadyx-0.3.11.0
+        working-directory: src\jadyx-0.3.12.0
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: "2"
         run: tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx --parallel 2
       - name: Run project gates
         shell: pwsh
-        working-directory: src\jadyx-0.3.11.0
+        working-directory: src\jadyx-0.3.12.0
         run: tools/xbox/tests/run-updater-gates.ps1
-      - name: Test graphics settings (FSR and Frame Generation)
+      - name: Test graphics, cache pressure and localization
         shell: pwsh
-        working-directory: src\jadyx-0.3.11.0
-        run: tools/xbox/tests/run-frontend.ps1 -Tests @('graphics-settings')
+        working-directory: src\jadyx-0.3.12.0
+        run: tools/xbox/tests/run-frontend.ps1 -Tests @('graphics-settings','cache-pressure','localization-catalogs','game-menu')
       - name: Build Mesa SPIR-V to DXIL translator
         shell: powershell
-        working-directory: src\jadyx-0.3.11.0
+        working-directory: src\jadyx-0.3.12.0
         run: |
           $ErrorActionPreference = "Stop"
           $work = Join-Path $env:RUNNER_TEMP "mesa-build"
@@ -59,13 +59,16 @@ jobs:
           $dll = Join-Path $work "build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
           if (-not (Test-Path $dll)) { throw "spirv_to_dxil.dll was not produced" }
           "SPIRV_DLL=$dll" >> $env:GITHUB_ENV
-      - name: Package and sign with a temporary test certificate
+      - name: Package, sign and verify AppX identity
         shell: pwsh
-        working-directory: src\jadyx-0.3.11.0
+        working-directory: src\jadyx-0.3.12.0
         env:
           PACKAGE_VERSION: ${{ inputs.package_version }}
         run: |
           $ErrorActionPreference = "Stop"
+          if ($env:PACKAGE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Package version must have four numeric parts" }
+          $target = [version]$env:PACKAGE_VERSION
+          if ($target -le [version]'0.3.11.1') { throw "Package version must be newer than 0.3.11.1" }
           $pfx = Join-Path $env:RUNNER_TEMP "jadyx-test.pfx"
           $plainPassword = [guid]::NewGuid().ToString("N") + "aA1!"
           $password = ConvertTo-SecureString $plainPassword -AsPlainText -Force
@@ -74,14 +77,25 @@ jobs:
           $env:JADYX_PFX_PASSWORD = $plainPassword
           & tools\xbox\package-appx.ps1 -Release -Version $env:PACKAGE_VERSION -SpirvToDxil $env:SPIRV_DLL -PfxPath $pfx
           if ($LASTEXITCODE -ne 0) { throw "AppX packaging/signing failed" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $appx = Join-Path $env:GITHUB_WORKSPACE 'src\jadyx-0.3.12.0\build-uwp\package\jadyx.appx'
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($appx)
+          try {
+            $entry = $zip.GetEntry('AppxManifest.xml')
+            if ($null -eq $entry) { throw "AppX manifest is missing" }
+            $reader = [System.IO.StreamReader]::new($entry.Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($manifest.Package.Identity.Version -ne $env:PACKAGE_VERSION) { throw "Internal AppX version '$($manifest.Package.Identity.Version)' does not match requested '$env:PACKAGE_VERSION'" }
+            if ($null -eq $zip.GetEntry('AppxSignature.p7x')) { throw "AppX signature is missing" }
+          } finally { $zip.Dispose() }
           $out = Join-Path $env:GITHUB_WORKSPACE "out"
           New-Item -ItemType Directory -Force $out | Out-Null
-          Copy-Item "build-uwp\package\jadyx.appx" (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_x64.appx")
+          Copy-Item $appx (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_x64.appx")
           Copy-Item "build-uwp\package\jadyx.cer" (Join-Path $out "Jadyx_test.cer")
           Copy-Item "build-uwp\package\Microsoft.VCLibs.x64.14.00.appx" $out
       - uses: actions/upload-artifact@v7
         with:
-          name: jadyx-xbox-appx-test
+          name: jadyx-xbox-appx-0.3.12.1
           path: out/*
           if-no-files-found: error
           retention-days: 7
