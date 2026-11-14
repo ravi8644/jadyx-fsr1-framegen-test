@@ -1,0 +1,126 @@
+name: Xbox AppX preview build (Jadyx 0.4.0.1)
+on:
+  workflow_dispatch:
+    inputs:
+      package_version:
+        description: Versão do pacote para instalação no Xbox
+        required: true
+        default: "0.4.0.1"
+        type: string
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Extrair source mesclado
+        shell: pwsh
+        run: Expand-Archive -LiteralPath .\jadyx-0.4.0.1-merged-source.zip -DestinationPath $env:GITHUB_WORKSPACE\src
+
+      - name: Restaurar cache de fontes CPM
+        uses: actions/cache@v6
+        with:
+          path: src/jadyx-0.4.0.1/.cache/cpm
+          key: cpm-xbox-0.4.0.1-${{ hashFiles('jadyx-0.4.0.1-merged-source.zip') }}
+          restore-keys: |
+            cpm-xbox-
+
+      - name: Instalar glslang verificado e ferramentas de build
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $asset = "assets/glslang-16.6.0-windows-x86_64-release.zip"
+          $expected = "82bf434e69b9bb4829de7e2b4bc2c5e7a7861e53d66cf75e5cc70f5f694a8d9b"
+          $actual = (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) { throw "SHA-256 inválido para glslang: $actual" }
+          Expand-Archive -LiteralPath $asset -DestinationPath C:\glslang -Force
+          Copy-Item C:\glslang\bin\glslang.exe C:\glslang\bin\glslangValidator.exe
+          if (-not (Test-Path "C:\Program Files\NASM\nasm.exe")) { choco install nasm -y --no-progress }
+          if (-not (Get-Command jom -ErrorAction SilentlyContinue)) { choco install jom -y --no-progress }
+          if (-not (Test-Path "C:\Strawberry\perl\bin\perl.exe")) { throw "Strawberry Perl não está disponível no runner" }
+
+      - name: Preparar mirrors locais de Boost e SDL3
+        shell: pwsh
+        run: .\prepare-local-dependencies.ps1 -SourceRoot .\src\jadyx-0.4.0.1
+
+      - name: Configurar UWP x64
+        shell: cmd
+        working-directory: src\jadyx-0.4.0.1
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: tools\xbox\build-env.bat cmake --preset uwp-x64 -DBoost_CUSTOM_DIR="%BOOST_CUSTOM_DIR%" -DSDL3_CUSTOM_DIR="%SDL3_CUSTOM_DIR%"
+
+      - name: Compilar Jadyx
+        shell: cmd
+        working-directory: src\jadyx-0.4.0.1
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: "2"
+        run: tools\xbox\build-env.bat cmake --build --preset uwp-x64 --target jadyx --parallel 2
+
+      - name: Executar gates e testes locais
+        shell: pwsh
+        working-directory: src\jadyx-0.4.0.1
+        run: |
+          tools/xbox/tests/run-updater-gates.ps1
+          tools/xbox/tests/run-frontend.ps1 -Tests @('graphics-settings','cache-pressure','localization-catalogs','game-menu','output-cap')
+
+      - name: Compilar tradutor Mesa SPIR-V para DXIL
+        shell: pwsh
+        working-directory: src\jadyx-0.4.0.1
+        run: |
+          $ErrorActionPreference = "Stop"
+          $work = Join-Path $env:RUNNER_TEMP "mesa-build"
+          & tools\xbox\build-spirv-to-dxil.ps1 -WorkDir $work
+          if ($LASTEXITCODE -ne 0) { throw "Falha ao compilar SPIR-V para DXIL" }
+          $dll = Join-Path $work "build-uwp\src\microsoft\spirv_to_dxil\spirv_to_dxil.dll"
+          if (-not (Test-Path $dll)) { throw "spirv_to_dxil.dll não foi criado" }
+          "SPIRV_DLL=$dll" >> $env:GITHUB_ENV
+
+      - name: Empacotar, assinar e verificar identidade do AppX
+        shell: pwsh
+        working-directory: src\jadyx-0.4.0.1
+        env:
+          PACKAGE_VERSION: ${{ inputs.package_version }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:PACKAGE_VERSION -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "A versão precisa ter quatro componentes numéricos" }
+          if ([version]$env:PACKAGE_VERSION -le [version]'0.4.0.0') { throw "A versão precisa ser superior a 0.4.0.0" }
+          $pfx = Join-Path $env:RUNNER_TEMP "jadyx-test.pfx"
+          $plainPassword = [guid]::NewGuid().ToString("N") + "aA1!"
+          $password = ConvertTo-SecureString $plainPassword -AsPlainText -Force
+          $cert = New-SelfSignedCertificate -Type CodeSigningCert -Subject "CN=JadyxDev" -CertStoreLocation "Cert:\CurrentUser\My" -KeyExportPolicy Exportable -HashAlgorithm SHA256 -NotAfter (Get-Date).AddYears(1)
+          Export-PfxCertificate -Cert $cert -FilePath $pfx -Password $password | Out-Null
+          $env:JADYX_PFX_PASSWORD = $plainPassword
+          & tools\xbox\package-appx.ps1 -Release -Version $env:PACKAGE_VERSION -SpirvToDxil $env:SPIRV_DLL -PfxPath $pfx
+          if ($LASTEXITCODE -ne 0) { throw "Falha no empacotamento/assinatura AppX" }
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $appx = Join-Path $env:GITHUB_WORKSPACE 'src\jadyx-0.4.0.1\build-uwp\package\jadyx.appx'
+          $zip = [System.IO.Compression.ZipFile]::OpenRead($appx)
+          try {
+            $entry = $zip.GetEntry('AppxManifest.xml')
+            if ($null -eq $entry) { throw "Manifesto interno do AppX ausente" }
+            $reader = [System.IO.StreamReader]::new($entry.Open())
+            try { [xml]$manifest = $reader.ReadToEnd() } finally { $reader.Dispose() }
+            if ($manifest.Package.Identity.Version -ne $env:PACKAGE_VERSION) { throw "Versão interna '$($manifest.Package.Identity.Version)' diferente da solicitada '$env:PACKAGE_VERSION'" }
+            if ($null -eq $zip.GetEntry('AppxSignature.p7x')) { throw "Assinatura AppX ausente" }
+          } finally { $zip.Dispose() }
+          $out = Join-Path $env:GITHUB_WORKSPACE "out"
+          New-Item -ItemType Directory -Force $out | Out-Null
+          Copy-Item $appx (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_x64.appx")
+          Copy-Item "build-uwp\package\jadyx.cer" (Join-Path $out "Jadyx_test.cer")
+          Copy-Item "build-uwp\package\Microsoft.VCLibs.x64.14.00.appx" $out
+          Copy-Item (Join-Path $env:GITHUB_WORKSPACE 'jadyx-0.4.0.1-merged-source.zip') (Join-Path $out "Jadyx_$($env:PACKAGE_VERSION)_merged_source.zip")
+          [ordered]@{ version = $env:PACKAGE_VERSION; commit = $env:GITHUB_SHA; run = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" } | ConvertTo-Json | Set-Content -Encoding ascii (Join-Path $out 'build-info.json')
+          Get-ChildItem $out -File | Sort-Object Name | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content -Encoding ascii (Join-Path $out 'SHA256SUMS.txt')
+          Get-ChildItem $out | Format-Table Name, Length
+          Remove-Item -LiteralPath $pfx -Force
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: jadyx-xbox-appx-0.4.0.1
+          path: out/*
+          if-no-files-found: error
+          retention-days: 14
