@@ -25,8 +25,8 @@ Expand-Archive -LiteralPath (Join-Path $assets 'boost-1.92.0-source.zip') -Desti
 Expand-Archive -LiteralPath (Join-Path $assets 'SDL3-ci-windows-amd64.zip') -DestinationPath $sdlRoot -Force
 $boostSource = Join-Path $boostRoot 'boost-1.92.0'
 if (-not (Test-Path (Join-Path $boostSource 'CMakeLists.txt')) -or
-    -not (Test-Path (Join-Path $boostSource 'boost\version.hpp'))) {
-    throw 'A árvore local do Boost não contém CMakeLists.txt e boost/version.hpp'
+    -not (Test-Path (Join-Path $boostSource 'libs\config\include\boost\version.hpp'))) {
+    throw 'A árvore local do Boost não contém CMakeLists.txt e o header boost/version.hpp'
 }
 if (-not (Test-Path (Join-Path $sdlRoot 'CMakeLists.txt'))) {
     throw 'A árvore local do SDL3 não contém CMakeLists.txt'
